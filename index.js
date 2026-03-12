@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 import express from "express";
 
+import { importBookmarkAsFollow } from "./lib/bookmark-import.js";
 import { microsubController } from "./lib/controllers/microsub.js";
 import { opmlController } from "./lib/controllers/opml.js";
 import { readerController } from "./lib/controllers/reader.js";
@@ -14,6 +15,7 @@ import {
   cleanupStaleItems,
   createIndexes,
 } from "./lib/storage/items.js";
+import { getUserId } from "./lib/utils/auth.js";
 import { webmentionReceiver } from "./lib/webmention/receiver.js";
 import { websubHandler } from "./lib/websub/handler.js";
 
@@ -22,6 +24,43 @@ const defaults = {
 };
 const router = express.Router();
 const readerRouter = express.Router();
+
+const bookmarkHookRouter = express.Router();
+bookmarkHookRouter.use((request, response, next) => {
+  response.on("finish", () => {
+    if (
+      request.method !== "POST" ||
+      (response.statusCode !== 201 && response.statusCode !== 202)
+    ) {
+      return;
+    }
+
+    const action =
+      request.query?.action || request.body?.action || "create";
+    if (action !== "create") return;
+
+    const bookmarkOf =
+      request.body?.["bookmark-of"] ||
+      request.body?.properties?.["bookmark-of"]?.[0];
+    if (!bookmarkOf) return;
+
+    const rawCategory =
+      request.body?.category ||
+      request.body?.properties?.category;
+    const category = Array.isArray(rawCategory)
+      ? rawCategory[0] || "bookmarks"
+      : rawCategory || "bookmarks";
+
+    const { application } = request.app.locals;
+    const userId = getUserId(request);
+    importBookmarkAsFollow(application, bookmarkOf, category, userId).catch(
+      (err) =>
+        console.warn("[Microsub] bookmark-import failed:", err.message),
+    );
+  });
+
+  next();
+});
 
 export default class MicrosubEndpoint {
   name = "Microsub endpoint";
@@ -66,6 +105,15 @@ export default class MicrosubEndpoint {
       iconName: "feed",
       requiresDatabase: true,
     };
+  }
+
+  /**
+   * Middleware hook registered on the Micropub route to intercept bookmark
+   * posts and auto-follow them as Microsub feed subscriptions.
+   * @returns {import("express").Router} Express router
+   */
+  get contentNegotiationRoutes() {
+    return bookmarkHookRouter;
   }
 
   /**
