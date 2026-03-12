@@ -3,7 +3,10 @@ import { fileURLToPath } from "node:url";
 
 import express from "express";
 
-import { importBookmarkAsFollow } from "./lib/bookmark-import.js";
+import {
+  importBookmarkAsFollow,
+  updateBookmarkFollow,
+} from "./lib/bookmark-import.js";
 import { microsubController } from "./lib/controllers/microsub.js";
 import { opmlController } from "./lib/controllers/opml.js";
 import { readerController } from "./lib/controllers/reader.js";
@@ -28,35 +31,87 @@ const readerRouter = express.Router();
 const bookmarkHookRouter = express.Router();
 bookmarkHookRouter.use((request, response, next) => {
   response.on("finish", () => {
-    if (
-      request.method !== "POST" ||
-      (response.statusCode !== 201 && response.statusCode !== 202)
-    ) {
-      return;
-    }
+    if (request.method !== "POST") return;
 
     const action =
       request.query?.action || request.body?.action || "create";
-    if (action !== "create") return;
-
-    const bookmarkOf =
-      request.body?.["bookmark-of"] ||
-      request.body?.properties?.["bookmark-of"]?.[0];
-    if (!bookmarkOf) return;
-
-    const rawCategory =
-      request.body?.category ||
-      request.body?.properties?.category;
-    const category = Array.isArray(rawCategory)
-      ? rawCategory[0] || "bookmarks"
-      : rawCategory || "bookmarks";
-
     const { application } = request.app.locals;
     const userId = getUserId(request);
-    importBookmarkAsFollow(application, bookmarkOf, category, userId).catch(
-      (err) =>
-        console.warn("[Microsub] bookmark-import failed:", err.message),
-    );
+
+    // ── CREATE: new bookmark post ────────────────────────────────────────────
+    if (
+      action === "create" &&
+      (response.statusCode === 201 || response.statusCode === 202)
+    ) {
+      const bookmarkOf =
+        request.body?.["bookmark-of"] ||
+        request.body?.properties?.["bookmark-of"]?.[0];
+      if (!bookmarkOf) return;
+
+      // Collect all tags (all micropub body formats)
+      const rawCategory =
+        request.body?.category ||
+        request.body?.properties?.category;
+      const tags = Array.isArray(rawCategory)
+        ? rawCategory.filter(Boolean)
+        : rawCategory
+        ? [rawCategory]
+        : [];
+
+      // The post permalink may appear in the Location response header
+      const postUrl = response.getHeader?.("Location") || undefined;
+
+      importBookmarkAsFollow(application, bookmarkOf, tags, userId, postUrl).catch(
+        (err) =>
+          console.warn("[Microsub] bookmark-import failed:", err.message),
+      );
+      return;
+    }
+
+    // ── UPDATE: bookmark post edited ─────────────────────────────────────────
+    if (
+      action === "update" &&
+      (response.statusCode === 200 ||
+        response.statusCode === 204)
+    ) {
+      const postUrl = request.body?.url;
+      if (!postUrl) return;
+
+      // Detect what changed
+      const replace = request.body?.replace || {};
+      const deleteFields = request.body?.delete || [];
+      const deleteList = Array.isArray(deleteFields)
+        ? deleteFields
+        : Object.keys(deleteFields);
+
+      // bookmark-of removed?
+      const bookmarkRemoved =
+        deleteList.includes("bookmark-of") ||
+        (replace["bookmark-of"] !== undefined &&
+          !replace["bookmark-of"]?.[0]);
+
+      // New tags?
+      const rawNewTags =
+        replace.category ||
+        replace?.properties?.category;
+      const newTags = rawNewTags
+        ? Array.isArray(rawNewTags)
+          ? rawNewTags.filter(Boolean)
+          : [rawNewTags]
+        : null;
+
+      if (bookmarkRemoved || newTags) {
+        updateBookmarkFollow(
+          application,
+          postUrl,
+          { bookmarkRemoved: !!bookmarkRemoved, newTags: newTags || undefined },
+          userId,
+        ).catch((err) =>
+          console.warn("[Microsub] bookmark-update failed:", err.message),
+        );
+      }
+      return;
+    }
   });
 
   next();
